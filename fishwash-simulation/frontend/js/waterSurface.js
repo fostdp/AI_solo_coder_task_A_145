@@ -1,171 +1,212 @@
 var WaterSurface = (function () {
+  var DEFAULT_RADIUS = 0.18;
+  var DEFAULT_SEGMENTS = 64;
+  var WATER_LEVEL = 0.08;
+
   function WaterSurface() {
-    this.mesh = null;
-    this.originalPositions = null;
-    this.radius = 0.18;
-    this.waterLevel = 0.08;
-    this.createWaterMesh();
-  }
+    this.radius = DEFAULT_RADIUS;
+    this.segments = DEFAULT_SEGMENTS;
+    this.modeOrder = 2;
+    this.frequency = 3.0;
+    this.amplitude = 0.02;
+    this.waterLevel = WATER_LEVEL;
+    this.time = 0.0;
 
-  WaterSurface.prototype.createWaterMesh = function () {
-    var geometry = new THREE.PlaneGeometry(this.radius * 2, this.radius * 2, 64, 64);
+    this.uniforms = {
+      uTime: { value: 0.0 },
+      uModeOrder: { value: 2.0 },
+      uFrequency: { value: 3.0 },
+      uAmplitude: { value: 0.02 },
+      uRadius: { value: DEFAULT_RADIUS },
+      uColorDeep: { value: new THREE.Color(0x10406B) },
+      uColorMid: { value: new THREE.Color(0x4682B4) },
+      uColorShallow: { value: new THREE.Color(0x87CEEB) },
+      uColorCrest: { value: new THREE.Color(0xFFFFFF) }
+    };
 
-    var material = new THREE.MeshPhongMaterial({
-      color: 0x1E90FF,
+    var vertexShader = [
+      'uniform float uTime;',
+      'uniform float uModeOrder;',
+      'uniform float uFrequency;',
+      'uniform float uAmplitude;',
+      'uniform float uRadius;',
+      '',
+      'varying float vDisplacement;',
+      'varying vec3 vNormal;',
+      'varying vec3 vViewDir;',
+      '',
+      'float besselJ(float n, float x) {',
+      '  if (x < 0.001) {',
+      '    float val = 1.0;',
+      '    for (int k = 1; k <= 3; k++) {',
+      '      float fk = float(k);',
+      '      float sign = mod(fk, 2.0) == 0.0 ? 1.0 : -1.0;',
+      '      float term = sign * pow(x / 2.0, n + 2.0 * fk);',
+      '      float denom = 1.0;',
+      '      for (int j = 1; j <= 8; j++) {',
+      '        float fj = float(j);',
+      '        if (fj <= fk) denom *= fj;',
+      '        if (fj <= n + fk) denom *= (n + fj);',
+      '      }',
+      '      val += term / denom;',
+      '    }',
+      '    return val;',
+      '  }',
+      '  float ax = abs(x);',
+      '  float z = 2.0 / ax;',
+      '  float y = z * z;',
+      '  float xx = x - (n + 0.5) * 3.141592653589793 * 0.5;',
+      '  float p = 1.0;',
+      '  float q = y * 0.5;',
+      '  for (int i = 1; i <= 6; i++) {',
+      '    float fi = float(i);',
+      '    p += pow(-1.0, fi) * pow(y / 4.0, fi * 2.0) * (1.0 - n * n) * (9.0 - n * n);',
+      '    q += pow(-1.0, fi) * pow(y / 4.0, fi * 2.0 + 1.0) * (1.0 - n * n);',
+      '  }',
+      '  return sqrt(2.0 / (3.141592653589793 * ax)) * (p * cos(xx) - q * sin(xx));',
+      '}',
+      '',
+      'void main() {',
+      '  vec3 pos = position;',
+      '',
+      '  float r = sqrt(pos.x * pos.x + pos.z * pos.z);',
+      '  float theta = atan(pos.z, pos.x);',
+      '',
+      '  float k = uModeOrder * 3.141592653589793 / uRadius;',
+      '  float kr = k * r;',
+      '  float jn = besselJ(uModeOrder, kr);',
+      '  float cosNTheta = cos(uModeOrder * theta);',
+      '  float omega = 2.0 * 3.141592653589793 * uFrequency;',
+      '  float cosOmegaT = cos(omega * uTime);',
+      '',
+      '  float displacement = uAmplitude * jn * cosNTheta * cosOmegaT;',
+      '',
+      '  float edgeFactor = smoothstep(uRadius, uRadius * 0.85, r);',
+      '  displacement *= edgeFactor;',
+      '',
+      '  pos.y += displacement;',
+      '',
+      '  vDisplacement = displacement / max(uAmplitude, 0.001);',
+      '',
+      '  float dJdr = uModeOrder * besselJ(uModeOrder - 1.0, kr) / uRadius - uModeOrder * jn / r;',
+      '  if (r < 0.001) dJdr = 0.0;',
+      '  float dx = uAmplitude * dJdr * cosNTheta * cosOmegaT * (pos.x / max(r, 0.001));',
+      '  float dz = uAmplitude * dJdr * cosNTheta * cosOmegaT * (pos.z / max(r, 0.001));',
+      '  vec3 normal = normalize(vec3(-dx, 1.0, -dz));',
+      '  vNormal = normalMatrix * normal;',
+      '',
+      '  vec4 mvPos = modelViewMatrix * vec4(pos, 1.0);',
+      '  vViewDir = normalize(-mvPos.xyz);',
+      '',
+      '  gl_Position = projectionMatrix * mvPos;',
+      '}'
+    ].join('\n');
+
+    var fragmentShader = [
+      'uniform vec3 uColorDeep;',
+      'uniform vec3 uColorMid;',
+      'uniform vec3 uColorShallow;',
+      'uniform vec3 uColorCrest;',
+      '',
+      'varying float vDisplacement;',
+      'varying vec3 vNormal;',
+      'varying vec3 vViewDir;',
+      '',
+      'void main() {',
+      '  float t = clamp(vDisplacement * 0.5 + 0.5, 0.0, 1.0);',
+      '',
+      '  vec3 color;',
+      '  if (t < 0.3) {',
+      '    float f = t / 0.3;',
+      '    color = mix(uColorDeep, uColorMid, f);',
+      '  } else if (t < 0.7) {',
+      '    float f = (t - 0.3) / 0.4;',
+      '    color = mix(uColorMid, uColorShallow, f);',
+      '  } else {',
+      '    float f = (t - 0.7) / 0.3;',
+      '    color = mix(uColorShallow, uColorCrest, f);',
+      '  }',
+      '',
+      '  vec3 lightDir = normalize(vec3(0.5, 1.0, 0.3));',
+      '  float diff = max(dot(vNormal, lightDir), 0.0);',
+      '',
+      '  vec3 halfDir = normalize(lightDir + vViewDir);',
+      '  float spec = pow(max(dot(vNormal, halfDir), 0.0), 64.0);',
+      '',
+      '  vec3 ambient = color * 0.4;',
+      '  vec3 diffuse = color * diff * 0.6;',
+      '  vec3 specular = vec3(0.9, 0.95, 1.0) * spec * (0.3 + t * 0.5);',
+      '',
+      '  vec3 finalColor = ambient + diffuse + specular;',
+      '  float alpha = 0.75 + t * 0.2;',
+      '',
+      '  gl_FragColor = vec4(finalColor, alpha);',
+      '}'
+    ].join('\n');
+
+    this.material = new THREE.ShaderMaterial({
+      uniforms: this.uniforms,
+      vertexShader: vertexShader,
+      fragmentShader: fragmentShader,
       transparent: true,
-      opacity: 0.7,
-      shininess: 100,
-      specular: 0xFFFFFF,
-      side: THREE.DoubleSide
+      side: THREE.DoubleSide,
+      depthWrite: false
     });
 
-    this.mesh = new THREE.Mesh(geometry, material);
-    this.mesh.rotation.x = -Math.PI / 2;
+    this.geometry = new THREE.CircleGeometry(this.radius, this.segments);
+    this.geometry.rotateX(-Math.PI / 2);
+
+    this.mesh = new THREE.Mesh(this.geometry, this.material);
     this.mesh.position.y = this.waterLevel;
     this.mesh.receiveShadow = true;
-
-    this.originalPositions = new Float32Array(geometry.attributes.position.array);
-    this.cropToCircle();
-  };
-
-  WaterSurface.prototype.cropToCircle = function () {
-    var positions = this.mesh.geometry.attributes.position.array;
-    for (var i = 0; i < positions.length; i += 3) {
-      var x = positions[i];
-      var z = positions[i + 2];
-      var r = Math.sqrt(x * x + z * z);
-      if (r > this.radius) {
-        var scale = this.radius / r;
-        positions[i] = x * scale;
-        positions[i + 2] = z * scale;
-      }
-    }
-    this.mesh.geometry.attributes.position.needsUpdate = true;
-    this.originalPositions = new Float32Array(positions);
-  };
-
-  WaterSurface.prototype.besselJ = function (n, x) {
-    var sum = 0;
-    var nFact = 1;
-    for (var i = 1; i <= n; i++) {
-      nFact *= i;
-    }
-
-    for (var k = 0; k < 10; k++) {
-      var kFact = 1;
-      for (var j = 1; j <= k; j++) {
-        kFact *= j;
-      }
-      var nkFact = 1;
-      for (var j = 1; j <= n + k; j++) {
-        nkFact *= j;
-      }
-      var sign = (k % 2 === 0) ? 1 : -1;
-      var term = sign / (kFact * nkFact) * Math.pow(x / 2, n + 2 * k);
-      sum += term;
-    }
-    return sum;
-  };
-
-  WaterSurface.prototype.updateWave = function (modeOrder, frequency, amplitude, time) {
-    if (!this.mesh) return;
-
-    var positions = this.mesh.geometry.attributes.position.array;
-    var origPos = this.originalPositions;
-    var R = this.radius;
-    var k = modeOrder * Math.PI / R;
-    var maxDisp = 0;
-
-    var displacements = [];
-
-    for (var i = 0; i < positions.length; i += 3) {
-      var ox = origPos[i];
-      var oz = origPos[i + 2];
-
-      var r = Math.sqrt(ox * ox + oz * oz);
-      if (r > this.radius) {
-        positions[i + 1] = 0;
-        displacements.push(0);
-        continue;
-      }
-
-      var theta = Math.atan2(oz, ox);
-      var besselVal = this.besselJ(modeOrder, k * r);
-      var displacement = amplitude * besselVal * Math.cos(modeOrder * theta) * Math.cos(2 * Math.PI * frequency * time);
-
-      positions[i + 1] = displacement;
-      displacements.push(displacement);
-
-      if (Math.abs(displacement) > maxDisp) {
-        maxDisp = Math.abs(displacement);
-      }
-    }
-
-    this.mesh.geometry.attributes.position.needsUpdate = true;
-    this.mesh.geometry.computeVertexNormals();
-
-    if (maxDisp > 0.0001) {
-      this.applyColorGradient(displacements, maxDisp);
-    }
-  };
-
-  WaterSurface.prototype.applyColorGradient = function (displacements, maxDisp) {
-    var geometry = this.mesh.geometry;
-    var count = displacements.length;
-
-    if (!geometry.attributes.color) {
-      var colors = new Float32Array(count * 3);
-      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    }
-
-    var colorAttr = geometry.attributes.color.array;
-
-    for (var i = 0; i < count; i++) {
-      var norm = displacements[i] / maxDisp;
-      var r, g, b;
-
-      if (norm > 0) {
-        r = 0.12 + 0.88 * norm;
-        g = 0.56 + 0.44 * norm;
-        b = 1.0;
-      } else {
-        var t = Math.abs(norm);
-        r = 0.12 * (1 - t);
-        g = 0.56 * (1 - t) + 0.1 * t;
-        b = 1.0 * (1 - t) + 0.4 * t;
-      }
-
-      colorAttr[i * 3] = r;
-      colorAttr[i * 3 + 1] = g;
-      colorAttr[i * 3 + 2] = b;
-    }
-
-    geometry.attributes.color.needsUpdate = true;
-    this.mesh.material.vertexColors = true;
-    this.mesh.material.needsUpdate = true;
-  };
-
-  WaterSurface.prototype.setColorByHeight = function (displacement, maxDisp) {
-    if (maxDisp < 0.0001) maxDisp = 0.0001;
-    var norm = displacement / maxDisp;
-    var r, g, b;
-
-    if (norm > 0) {
-      r = 0.12 + 0.88 * norm;
-      g = 0.56 + 0.44 * norm;
-      b = 1.0;
-    } else {
-      var t = Math.abs(norm);
-      r = 0.12 * (1 - t);
-      g = 0.56 * (1 - t) + 0.1 * t;
-      b = 1.0 * (1 - t) + 0.4 * t;
-    }
-
-    return new THREE.Color(r, g, b);
-  };
+  }
 
   WaterSurface.prototype.getMesh = function () {
     return this.mesh;
+  };
+
+  WaterSurface.prototype.setModeOrder = function (n) {
+    this.modeOrder = n;
+    this.uniforms.uModeOrder.value = n;
+  };
+
+  WaterSurface.prototype.setFrequency = function (f) {
+    this.frequency = f;
+    this.uniforms.uFrequency.value = f;
+  };
+
+  WaterSurface.prototype.setAmplitude = function (a) {
+    this.amplitude = a;
+    this.uniforms.uAmplitude.value = a;
+  };
+
+  WaterSurface.prototype.setRadius = function (r) {
+    this.radius = r;
+    this.uniforms.uRadius.value = r;
+  };
+
+  WaterSurface.prototype.setWaterLevel = function (y) {
+    this.waterLevel = y;
+    this.mesh.position.y = y;
+  };
+
+  WaterSurface.prototype.updateWave = function (modeOrder, frequency, amplitude, time) {
+    if (modeOrder !== this.modeOrder) {
+      this.setModeOrder(modeOrder);
+    }
+    if (frequency !== this.frequency) {
+      this.setFrequency(frequency);
+    }
+    if (amplitude !== this.amplitude) {
+      this.setAmplitude(amplitude);
+    }
+    this.time = time;
+    this.uniforms.uTime.value = time;
+  };
+
+  WaterSurface.prototype.dispose = function () {
+    this.geometry.dispose();
+    this.material.dispose();
   };
 
   return WaterSurface;

@@ -14,8 +14,8 @@ var FishWashApp = (function () {
     this.clock = new THREE.Clock();
     this.currentModeOrder = 2;
     this.currentFrequency = 3.0;
-    this.currentAmplitude = 0.005;
-    this.currentSprayHeight = 0.1;
+    this.currentAmplitude = 0.02;
+    this.currentSprayHeight = 0.15;
     this.selectedDeviceId = null;
     this.animating = false;
     this.animationId = null;
@@ -218,7 +218,7 @@ var FishWashApp = (function () {
       self.waterSurface.updateWave(
         self.currentModeOrder,
         self.currentFrequency,
-        self.currentAmplitude * 10,
+        self.currentAmplitude,
         elapsed
       );
 
