@@ -49,3 +49,19 @@ fishwash:
     resonance-drift-critical: 0.15
     spray-deviation-warning: 0.30
     spray-deviation-critical: 0.50
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      show-details: when-authorized
+  metrics:
+    tags:
+      application: fishwash-simulation
+  prometheus:
+    metrics:
+      export:
+        enabled: true

@@ -10,8 +10,13 @@ from datetime import datetime
 import requests
 
 try:
-    from colorama import Fore, Style, init as colorama_init
+    import paho.mqtt.client as mqtt
+    HAS_MQTT = True
+except ImportError:
+    HAS_MQTT = False
 
+try:
+    from colorama import Fore, Style, init as colorama_init
     colorama_init(autoreset=True)
     HAS_COLORAMA = True
 except ImportError:
@@ -45,13 +50,16 @@ class Color:
 
 
 class DeviceSimulator:
-    def __init__(self, device_id, resonance_freq, base_freq, drift_probability):
+    def __init__(self, device_id, resonance_freq, base_freq, drift_probability,
+                 fixed_freq=None, fixed_temp=None):
         self.device_id = device_id
         self.resonance_freq = resonance_freq
         self.current_freq = base_freq
         self.base_freq = base_freq
         self.drift_probability = drift_probability
-        self.water_temp = 20.0 + random.uniform(-1, 1)
+        self.fixed_freq = fixed_freq
+        self.fixed_temp = fixed_temp
+        self.water_temp = fixed_temp if fixed_temp is not None else 20.0 + random.uniform(-1, 1)
         self.step_count = 0
         self.total_amplitude = 0.0
         self.total_spray_height = 0.0
@@ -63,17 +71,21 @@ class DeviceSimulator:
     def generate_data(self):
         self.step_count += 1
 
-        if random.random() < self.drift_probability:
-            self.current_freq += random.uniform(-10, 10)
+        if self.fixed_freq is not None:
+            self.current_freq = self.fixed_freq + random.uniform(-0.5, 0.5)
         else:
-            self.current_freq += random.uniform(-2, 2)
-
-        self.current_freq = max(self.base_freq * 0.5, min(self.base_freq * 1.5, self.current_freq))
+            if random.random() < self.drift_probability:
+                self.current_freq += random.uniform(-10, 10)
+            else:
+                self.current_freq += random.uniform(-2, 2)
+            self.current_freq = max(self.base_freq * 0.5, min(self.base_freq * 1.5, self.current_freq))
 
         amplitude = self._calc_amplitude(self.current_freq)
         spray_height = self._calc_spray_height(amplitude)
-        self.water_temp += random.uniform(-0.1, 0.1)
-        self.water_temp = max(15.0, min(35.0, self.water_temp))
+
+        if self.fixed_temp is None:
+            self.water_temp += random.uniform(-0.1, 0.1)
+            self.water_temp = max(15.0, min(35.0, self.water_temp))
 
         self.total_amplitude += amplitude
         self.total_spray_height += spray_height
@@ -160,15 +172,79 @@ def print_stats(devices):
     print()
 
 
+class MqttPublisher:
+    def __init__(self, host, port, username, password):
+        self.host = host
+        self.port = port
+        self.client = None
+        if not HAS_MQTT:
+            raise RuntimeError("paho-mqtt not installed. Install with: pip install paho-mqtt")
+        self.client = mqtt.Client(client_id=f"fishwash-sim-{random.randint(1000,9999)}")
+        if username and password:
+            self.client.username_pw_set(username, password)
+        self.connected = False
+
+    def connect(self):
+        self.client.on_connect = self._on_connect
+        self.client.on_disconnect = self._on_disconnect
+        try:
+            self.client.connect(self.host, self.port, keepalive=60)
+            self.client.loop_start()
+            time.sleep(1)
+        except Exception as e:
+            print(Color.red(f"MQTT connection failed: {e}"))
+            self.connected = False
+
+    def _on_connect(self, client, userdata, flags, rc):
+        if rc == 0:
+            self.connected = True
+            print(Color.green("MQTT connected"))
+        else:
+            print(Color.red(f"MQTT connection failed with code {rc}"))
+            self.connected = False
+
+    def _on_disconnect(self, client, userdata, rc):
+        self.connected = False
+        if rc != 0:
+            print(Color.yellow(f"MQTT unexpected disconnect (rc={rc})"))
+
+    def publish(self, device_id, data):
+        if not self.connected:
+            return False
+        topic = f"fishwash/sensor/{device_id}"
+        payload = json.dumps(data)
+        result = self.client.publish(topic, payload, qos=1)
+        return result.rc == 0
+
+    def disconnect(self):
+        if self.client:
+            self.client.loop_stop()
+            self.client.disconnect()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Fish Wash Sensor Simulator")
-    parser.add_argument("--api-url", default="http://localhost:8080", help="API base URL")
+    parser.add_argument("--api-url", default="http://localhost:8080", help="API base URL (HTTP mode)")
+    parser.add_argument("--mode", choices=["http", "mqtt", "both"], default="http",
+                        help="Publish mode: http (REST API), mqtt (MQTT broker), or both")
+    parser.add_argument("--mqtt-host", default="localhost", help="MQTT broker host")
+    parser.add_argument("--mqtt-port", type=int, default=1883, help="MQTT broker port")
+    parser.add_argument("--mqtt-user", default=None, help="MQTT username")
+    parser.add_argument("--mqtt-password", default=None, help="MQTT password")
     parser.add_argument("--device-ids", nargs="+", type=int, default=[1, 2], help="Device IDs to simulate")
     parser.add_argument("--interval", type=int, default=60, help="Reporting interval in seconds")
     parser.add_argument("--resonance-freq", type=float, default=None, help="Override resonance frequency for all devices")
+    parser.add_argument("--fixed-freq", type=float, default=None,
+                        help="Fix friction frequency to a constant value (Hz), disables random walk")
+    parser.add_argument("--fixed-temp", type=float, default=None,
+                        help="Fix water temperature to a constant value (°C), disables random walk")
     parser.add_argument("--drift-probability", type=float, default=0.1, help="Probability of frequency drift per step")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
     args = parser.parse_args()
+
+    if args.mode in ("mqtt", "both") and not HAS_MQTT:
+        print(Color.red("Error: paho-mqtt is required for MQTT mode. Install with: pip install paho-mqtt"))
+        sys.exit(1)
 
     device_configs = {
         1: {"resonance_freq": 285.6, "base_freq": 280.0},
@@ -182,8 +258,14 @@ def main():
         base_freq = cfg["base_freq"]
         if args.resonance_freq is not None:
             base_freq = args.resonance_freq
-        dev = DeviceSimulator(did, res_freq, base_freq, args.drift_probability)
+        dev = DeviceSimulator(did, res_freq, base_freq, args.drift_probability,
+                              fixed_freq=args.fixed_freq, fixed_temp=args.fixed_temp)
         devices.append(dev)
+
+    mqtt_pub = None
+    if args.mode in ("mqtt", "both"):
+        mqtt_pub = MqttPublisher(args.mqtt_host, args.mqtt_port, args.mqtt_user, args.mqtt_password)
+        mqtt_pub.connect()
 
     running = True
 
@@ -197,10 +279,18 @@ def main():
     print(Color.magenta("=" * 80))
     print(Color.magenta("  Fish Wash (鱼洗铜盆) Sensor Simulator"))
     print(Color.magenta("=" * 80))
-    print(f"  API URL: {Color.blue(args.api_url)}")
+    print(f"  Mode: {Color.blue(args.mode.upper())}")
+    if args.mode in ("http", "both"):
+        print(f"  API URL: {Color.blue(args.api_url)}")
+    if args.mode in ("mqtt", "both"):
+        print(f"  MQTT Broker: {Color.blue(f'{args.mqtt_host}:{args.mqtt_port}')}")
     print(f"  Devices: {Color.blue(str(args.device_ids))}")
     print(f"  Interval: {Color.blue(str(args.interval) + 's')}")
     print(f"  Drift Probability: {Color.blue(str(args.drift_probability))}")
+    if args.fixed_freq is not None:
+        print(f"  Fixed Frequency: {Color.blue(str(args.fixed_freq) + ' Hz')}")
+    if args.fixed_temp is not None:
+        print(f"  Fixed Temperature: {Color.blue(str(args.fixed_temp) + ' °C')}")
     for dev in devices:
         print(f"  Device {dev.device_id}: resonance={dev.resonance_freq} Hz, base_freq={dev.base_freq} Hz")
     print(Color.magenta("=" * 80))
@@ -209,22 +299,35 @@ def main():
     while running:
         for dev in devices:
             data = dev.generate_data()
-            url = build_api_url(args.api_url, dev.device_id)
 
-            if args.verbose:
-                print(Color.yellow(f"[VERBOSE] POST {url}"))
-                print(Color.yellow(f"[VERBOSE] Body: {json.dumps(data)}"))
+            http_ok = True
+            mqtt_ok = True
 
-            success, result = post_with_retry(url, data)
+            if args.mode in ("http", "both"):
+                url = build_api_url(args.api_url, dev.device_id)
+                if args.verbose:
+                    print(Color.yellow(f"[VERBOSE] POST {url}"))
+                    print(Color.yellow(f"[VERBOSE] Body: {json.dumps(data)}"))
+                success, result = post_with_retry(url, data)
+                if success:
+                    dev.success_count += 1
+                else:
+                    dev.failure_count += 1
+                    http_ok = False
+                    print(Color.red(f"  Device {dev.device_id} HTTP FAILED: {result}"))
 
-            if success:
-                dev.success_count += 1
+            if args.mode in ("mqtt", "both") and mqtt_pub:
+                ok = mqtt_pub.publish(dev.device_id, data)
+                if ok:
+                    dev.success_count += 1
+                else:
+                    dev.failure_count += 1
+                    mqtt_ok = False
+                    print(Color.red(f"  Device {dev.device_id} MQTT FAILED"))
+
+            if http_ok and mqtt_ok:
                 row = format_table_row(dev.device_id, data)
                 print(Color.green(row))
-            else:
-                dev.failure_count += 1
-                row = format_table_row(dev.device_id, data)
-                print(Color.red(f"{row}  | FAILED: {result}"))
 
         if devices and devices[0].step_count % 10 == 0:
             print()
@@ -237,6 +340,9 @@ def main():
             if not running:
                 break
             time.sleep(1)
+
+    if mqtt_pub:
+        mqtt_pub.disconnect()
 
     print()
     print(Color.magenta("=" * 80))

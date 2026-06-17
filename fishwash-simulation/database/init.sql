@@ -158,6 +158,20 @@ CREATE INDEX idx_alert_record_type_unresolved ON alert_record(alert_type, is_res
 -- 设备表索引
 CREATE INDEX idx_fishwash_device_status ON fishwash_device(status);
 
+-- 时序数据优化：BRIN索引（适合按时间顺序写入的大表）
+CREATE INDEX idx_sensor_data_recorded_at_brin ON sensor_data USING BRIN(recorded_at) WITH (pages_per_range = 32);
+CREATE INDEX idx_spray_analysis_analyzed_at_brin ON spray_analysis USING BRIN(analyzed_at) WITH (pages_per_range = 32);
+
+-- JSONB索引：支持材质参数查询
+CREATE INDEX idx_device_material_params_gin ON fishwash_device USING GIN(material_params);
+CREATE INDEX idx_device_geometry_params_gin ON fishwash_device USING GIN(geometry_params);
+
+-- 活跃告警快速查询（部分索引）
+CREATE INDEX idx_alert_record_active ON alert_record(device_id, alert_type, created_at DESC) WHERE is_resolved = FALSE;
+
+-- 传感器数据最新记录查询优化
+CREATE INDEX idx_sensor_data_device_latest ON sensor_data(device_id, recorded_at DESC);
+
 -- ============================================================
 -- 示例数据：鱼洗设备
 -- ============================================================

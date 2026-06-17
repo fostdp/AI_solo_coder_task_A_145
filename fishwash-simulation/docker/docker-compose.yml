@@ -1,0 +1,114 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: fishwash-postgres
+    environment:
+      POSTGRES_DB: fishwash
+      POSTGRES_USER: fishwash
+      POSTGRES_PASSWORD: fishwash123
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ../database/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fishwash -d fishwash"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  mqtt-broker:
+    image: eclipse-mosquitto:2
+    container_name: fishwash-mqtt
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: fishwash-backend
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/fishwash
+      SPRING_DATASOURCE_USERNAME: fishwash
+      SPRING_DATASOURCE_PASSWORD: fishwash123
+      SPRING_MQTT_BROKER-URL: tcp://mqtt-broker:1883
+      JAVA_OPTS: "-XX:+UseG1GC -XX:MaxRAMPercentage=75.0"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mqtt-broker:
+        condition: service_started
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    container_name: fishwash-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  simulator:
+    build:
+      context: ../simulator
+      dockerfile: Dockerfile
+    container_name: fishwash-simulator
+    environment:
+      SIM_API_URL: http://backend:8080
+      SIM_MQTT_HOST: mqtt-broker
+      SIM_MQTT_PORT: 1883
+    command:
+      - "--mode=both"
+      - "--api-url=http://backend:8080"
+      - "--mqtt-host=mqtt-broker"
+      - "--mqtt-port=1883"
+      - "--device-ids=1"
+      - "2"
+      - "--interval=60"
+    depends_on:
+      - backend
+      - mqtt-broker
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: fishwash-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: fishwash-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin123
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafanadata:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  grafanadata:
