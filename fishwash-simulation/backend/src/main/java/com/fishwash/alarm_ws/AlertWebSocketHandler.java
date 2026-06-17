@@ -1,4 +1,4 @@
-package com.fishwash.service.websocket;
+package com.fishwash.alarm_ws;
 
 import com.fishwash.entity.AlertRecord;
 import lombok.RequiredArgsConstructor;

@@ -1,30 +1,43 @@
-package com.fishwash.service;
+package com.fishwash.dtu_receiver;
 
 import com.fishwash.entity.SensorData;
+import com.fishwash.event.SensorDataIngestedEvent;
 import com.fishwash.repository.FishWashDeviceRepository;
 import com.fishwash.repository.SensorDataRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
 
 @Service
 @RequiredArgsConstructor
-public class SensorDataService {
+public class DtuReceiverService {
 
     private final SensorDataRepository sensorDataRepository;
     private final FishWashDeviceRepository fishWashDeviceRepository;
-    private final SprayHeightService sprayHeightService;
-    private final AlertService alertService;
+    private final ApplicationEventPublisher eventPublisher;
 
-    public SensorData ingestSensorData(Integer deviceId, Double frictionFreq, Double amplitude,
+    public SensorData ingestAndPublish(Integer deviceId, Double frictionFreq, Double amplitude,
                                        Double sprayHeight, Double waterTemp, LocalDateTime recordedAt) {
         fishWashDeviceRepository.findById(deviceId)
-                .orElseThrow(() -> new RuntimeException("Device not found"));
+                .orElseThrow(() -> new IllegalArgumentException("Device not found: " + deviceId));
+
+        if (frictionFreq == null || frictionFreq <= 0 || frictionFreq >= 10000) {
+            throw new IllegalArgumentException("frictionFreq must be > 0 and < 10000");
+        }
+        if (amplitude == null || amplitude < 0) {
+            throw new IllegalArgumentException("amplitude must be >= 0");
+        }
+        if (sprayHeight == null || sprayHeight < 0) {
+            throw new IllegalArgumentException("sprayHeight must be >= 0");
+        }
+        if (waterTemp == null || waterTemp < -10 || waterTemp > 100) {
+            throw new IllegalArgumentException("waterTemp must be between -10 and 100");
+        }
 
         SensorData data = new SensorData();
         data.setDeviceId(deviceId);
@@ -35,21 +48,8 @@ public class SensorDataService {
         data.setRecordedAt(recordedAt);
         data = sensorDataRepository.save(data);
 
-        final Double freq = frictionFreq;
-        final Double height = sprayHeight;
-        final Integer did = deviceId;
-        CompletableFuture.runAsync(() -> {
-            try {
-                sprayHeightService.analyzeSprayHeight(did, freq, height);
-            } catch (Exception ignored) {
-            }
-        });
-        CompletableFuture.runAsync(() -> {
-            try {
-                alertService.checkAlerts(did, freq, height);
-            } catch (Exception ignored) {
-            }
-        });
+        eventPublisher.publishEvent(new SensorDataIngestedEvent(
+                this, deviceId, frictionFreq, amplitude, sprayHeight, waterTemp, recordedAt));
 
         return data;
     }

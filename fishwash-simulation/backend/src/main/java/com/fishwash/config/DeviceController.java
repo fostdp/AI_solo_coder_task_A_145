@@ -1,4 +1,4 @@
-package com.fishwash.controller;
+package com.fishwash.config;
 
 import com.fishwash.dto.ApiResponse;
 import com.fishwash.entity.FishWashDevice;

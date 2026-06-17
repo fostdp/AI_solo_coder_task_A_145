@@ -1,13 +1,21 @@
-package com.fishwash.service;
+package com.fishwash.water_jet_analyzer;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fishwash.config.FishWashProperties;
 import com.fishwash.entity.FishWashDevice;
+import com.fishwash.entity.SensorData;
 import com.fishwash.entity.SprayAnalysis;
 import com.fishwash.entity.VibrationMode;
+import com.fishwash.event.SensorDataIngestedEvent;
+import com.fishwash.event.SprayAnalysisCompletedEvent;
+import com.fishwash.event.VibrationModeComputedEvent;
 import com.fishwash.repository.FishWashDeviceRepository;
+import com.fishwash.repository.SensorDataRepository;
 import com.fishwash.repository.SprayAnalysisRepository;
 import com.fishwash.repository.VibrationModeRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.context.event.EventListener;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
@@ -18,24 +26,27 @@ import java.util.Map;
 
 @Service
 @RequiredArgsConstructor
-public class SprayHeightService {
-
-    private static final double GRAVITY = 9.81;
-    private static final double WATER_DENSITY = 1000.0;
-    private static final double ALE_SURFACE_STABILITY = 0.92;
-    private static final double SECONDARY_BREAKUP_THRESHOLD = 2.5;
-    private static final double SPLASH_COEFFICIENT = 0.65;
+public class WaterJetAnalyzerService {
 
     private final SprayAnalysisRepository sprayAnalysisRepository;
     private final FishWashDeviceRepository fishWashDeviceRepository;
     private final VibrationModeRepository vibrationModeRepository;
-    private final AlertService alertService;
+    private final SensorDataRepository sensorDataRepository;
+    private final FishWashProperties fishWashProperties;
     private final ObjectMapper objectMapper;
+    private final ApplicationEventPublisher eventPublisher;
 
     @SuppressWarnings("unchecked")
     public SprayAnalysis analyzeSprayHeight(Integer deviceId, Double frictionFreq, Double measuredSprayHeight) {
         FishWashDevice device = fishWashDeviceRepository.findById(deviceId)
                 .orElseThrow(() -> new RuntimeException("Device not found"));
+
+        double waterDensity = fishWashProperties.getFluid().getWaterDensity();
+        double surfaceTension = fishWashProperties.getFluid().getSurfaceTension();
+        double gravity = fishWashProperties.getFluid().getGravity();
+        double aleSurfaceStability = fishWashProperties.getAle().getSurfaceStability();
+        double secondaryBreakupThreshold = fishWashProperties.getSplash().getSecondaryBreakupThreshold();
+        double splashCoefficient = fishWashProperties.getSplash().getCoefficient();
 
         try {
             Map<String, Object> materialParams = objectMapper.readValue(device.getMaterialParams(), Map.class);
@@ -65,8 +76,8 @@ public class SprayHeightService {
             if (closestMode != null && closestMode.getFluidCouplingFactor() != null) {
                 aleCouplingFactor = closestMode.getFluidCouplingFactor();
             } else {
-                double rawCoupling = 1.0 / Math.sqrt(1.0 + WATER_DENSITY * radius / (density * thickness * modeOrder));
-                aleCouplingFactor = rawCoupling * ALE_SURFACE_STABILITY;
+                double rawCoupling = 1.0 / Math.sqrt(1.0 + waterDensity * radius / (density * thickness * modeOrder));
+                aleCouplingFactor = rawCoupling * aleSurfaceStability;
             }
 
             double efficiency = calculateSprayEfficiency(waterDepth, modeOrder, radius);
@@ -74,10 +85,10 @@ public class SprayHeightService {
             double amplitude = estimateAmplitude(frictionFreq, resonanceFreq, modeOrder, radius);
 
             double omega = 2.0 * Math.PI * resonanceFreq;
-            double baseHeight = (omega * omega * amplitude * amplitude) / (2.0 * GRAVITY);
+            double baseHeight = (omega * omega * amplitude * amplitude) / (2.0 * gravity);
 
-            double aleStabilityFactor = calculateAleSurfaceStability(modeOrder, waterDepth, radius);
-            double splashAmplification = calculateSplashAmplification(modeOrder, amplitude, waterDepth);
+            double aleStabilityFactor = calculateAleSurfaceStability(modeOrder, waterDepth, radius, aleSurfaceStability);
+            double splashAmplification = calculateSplashAmplification(modeOrder, amplitude, waterDensity, surfaceTension, secondaryBreakupThreshold, splashCoefficient);
 
             double predictedHeightCm = baseHeight * aleCouplingFactor * efficiency
                     * aleStabilityFactor * splashAmplification * 100.0;
@@ -86,7 +97,7 @@ public class SprayHeightService {
                     ? Math.abs(predictedHeightCm - measuredSprayHeight) / measuredSprayHeight
                     : 0.0;
 
-            int secondaryBreakupCount = estimateSecondaryBreakupParticles(modeOrder, amplitude, waterDepth);
+            int secondaryBreakupCount = estimateSecondaryBreakupParticles(modeOrder, amplitude, waterDensity, surfaceTension, secondaryBreakupThreshold);
 
             String splashParams = String.format(
                     "{\"aleCouplingFactor\":%.6f,\"efficiency\":%.4f,\"waterDepth\":%.4f," +
@@ -96,7 +107,7 @@ public class SprayHeightService {
                     aleCouplingFactor, efficiency, waterDepth,
                     modeOrder, aleStabilityFactor, splashAmplification,
                     amplitude, secondaryBreakupCount,
-                    SPLASH_COEFFICIENT, ALE_SURFACE_STABILITY);
+                    splashCoefficient, aleSurfaceStability);
 
             SprayAnalysis analysis = new SprayAnalysis();
             analysis.setDeviceId(deviceId);
@@ -109,14 +120,32 @@ public class SprayHeightService {
             analysis.setAnalyzedAt(LocalDateTime.now());
             analysis = sprayAnalysisRepository.save(analysis);
 
-            if (deviationRatio > 0.3) {
-                alertService.checkAlerts(deviceId, frictionFreq, measuredSprayHeight);
-            }
+            eventPublisher.publishEvent(new SprayAnalysisCompletedEvent(
+                    this, deviceId, frictionFreq, predictedHeightCm, measuredSprayHeight, deviationRatio));
 
             return analysis;
         } catch (Exception e) {
             throw new RuntimeException("Failed to analyze spray height", e);
         }
+    }
+
+    @EventListener
+    public void onSensorDataIngested(SensorDataIngestedEvent event) {
+        analyzeSprayHeight(event.getDeviceId(), event.getFrictionFreq(), event.getSprayHeight());
+    }
+
+    @EventListener
+    public void onVibrationModeComputed(VibrationModeComputedEvent event) {
+        SensorData latestData = sensorDataRepository
+                .findTop1ByDeviceIdOrderByRecordedAtDesc(event.getDeviceId())
+                .orElse(null);
+        if (latestData != null) {
+            analyzeSprayHeight(event.getDeviceId(), latestData.getFrictionFreq(), latestData.getSprayHeight());
+        }
+    }
+
+    public Page<SprayAnalysis> getSprayAnalysisHistory(Integer deviceId, int page, int size) {
+        return sprayAnalysisRepository.findByDeviceIdOrderByAnalyzedAtDesc(deviceId, PageRequest.of(page, size));
     }
 
     private double calculateSprayEfficiency(double waterDepth, int modeOrder, double radius) {
@@ -144,32 +173,28 @@ public class SprayHeightService {
         return baseAmp * dynamicAmpFactor;
     }
 
-    private double calculateAleSurfaceStability(int modeOrder, double waterDepth, double radius) {
+    private double calculateAleSurfaceStability(int modeOrder, double waterDepth, double radius, double aleSurfaceStability) {
         double curvatureRatio = waterDepth / radius;
         double modeFactor = 1.0 / Math.sqrt(1.0 + modeOrder * 0.15);
-        double stability = ALE_SURFACE_STABILITY + (1.0 - curvatureRatio) * 0.05;
+        double stability = aleSurfaceStability + (1.0 - curvatureRatio) * 0.05;
         return Math.min(1.0, stability * modeFactor);
     }
 
-    private double calculateSplashAmplification(int modeOrder, double amplitude, double waterDepth) {
-        double weberNumber = WATER_DENSITY * amplitude * amplitude * modeOrder * modeOrder / 0.073;
-        if (weberNumber > SECONDARY_BREAKUP_THRESHOLD) {
-            return 1.0 + SPLASH_COEFFICIENT * Math.log10(weberNumber / SECONDARY_BREAKUP_THRESHOLD + 1.0);
+    private double calculateSplashAmplification(int modeOrder, double amplitude, double waterDensity, double surfaceTension, double secondaryBreakupThreshold, double splashCoefficient) {
+        double weberNumber = waterDensity * amplitude * amplitude * modeOrder * modeOrder / surfaceTension;
+        if (weberNumber > secondaryBreakupThreshold) {
+            return 1.0 + splashCoefficient * Math.log10(weberNumber / secondaryBreakupThreshold + 1.0);
         }
         return 1.0;
     }
 
-    private int estimateSecondaryBreakupParticles(int modeOrder, double amplitude, double waterDepth) {
+    private int estimateSecondaryBreakupParticles(int modeOrder, double amplitude, double waterDensity, double surfaceTension, double secondaryBreakupThreshold) {
         int baseParticles = modeOrder * 2 * 20;
-        double weberNumber = WATER_DENSITY * amplitude * amplitude * modeOrder * modeOrder / 0.073;
-        if (weberNumber > SECONDARY_BREAKUP_THRESHOLD) {
-            double multiplier = 1.0 + (weberNumber - SECONDARY_BREAKUP_THRESHOLD) * 0.3;
+        double weberNumber = waterDensity * amplitude * amplitude * modeOrder * modeOrder / surfaceTension;
+        if (weberNumber > secondaryBreakupThreshold) {
+            double multiplier = 1.0 + (weberNumber - secondaryBreakupThreshold) * 0.3;
             baseParticles = (int) (baseParticles * Math.min(5.0, multiplier));
         }
         return baseParticles;
-    }
-
-    public Page<SprayAnalysis> getSprayAnalysisHistory(Integer deviceId, int page, int size) {
-        return sprayAnalysisRepository.findByDeviceIdOrderByAnalyzedAtDesc(deviceId, PageRequest.of(page, size));
     }
 }

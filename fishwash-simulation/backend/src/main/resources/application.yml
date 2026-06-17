@@ -18,3 +18,34 @@ spring:
 jackson:
   date-format: yyyy-MM-dd HH:mm:ss
   time-zone: Asia/Shanghai
+
+fishwash:
+  material:
+    bronze-standard:
+      density: 8500.0
+      elastic-modulus: 1.0e11
+      poisson-ratio: 0.34
+      tin-content-pct: 15.0
+    bronze-high-tin:
+      density: 8700.0
+      elastic-modulus: 0.95e11
+      poisson-ratio: 0.33
+      tin-content-pct: 20.0
+  fluid:
+    water-density: 1000.0
+    surface-tension: 0.073
+    gravity: 9.81
+  ale:
+    transition-ratio: 0.15
+    mesh-distortion-threshold: 0.35
+    artificial-viscosity: 0.02
+    stability-factor: 0.85
+    surface-stability: 0.92
+  splash:
+    secondary-breakup-threshold: 3.5
+    coefficient: 0.65
+  alert:
+    resonance-drift-warning: 0.05
+    resonance-drift-critical: 0.15
+    spray-deviation-warning: 0.30
+    spray-deviation-critical: 0.50
